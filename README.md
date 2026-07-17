@@ -11,6 +11,17 @@ PC (browser) ──Tailscale/LAN──▶ Phone (Termux)
                                 └─ SQLite → templates, external contacts, notes
 ```
 
+## ⚠️ Disable RCS before using this app
+
+Modern Android phones (Samsung/Google Messages) default to **RCS "chat features"**, which send messages over the internet instead of SMS. RCS messages are **not stored in Android's SMS database and no third-party app can read them** — they will never appear in this dashboard, and there is no way to import old RCS history.
+
+Disable RCS first, so all conversations travel as real SMS from that point on:
+
+- **Google Messages**: profile photo → Messages settings → RCS chats → off.
+- **Samsung Messages**: Settings → Chat settings → off.
+
+Old RCS messages remain visible only in the phone's Messages app. Everything sent/received *after* disabling RCS syncs fully (and anything sent through this dashboard is always recorded).
+
 ## Phone requirements
 
 1. **Termux** installed from F-Droid (the Play Store build is outdated and incompatible).
@@ -116,8 +127,14 @@ Conversations are grouped by the **last 10 digits** of the number, so `+1 787 55
 
 Visit `/api/status` for diagnostics (cache size, backfill progress, last sync, errors).
 
+## REST API for external applications
+
+The server exposes a standardized REST API (`/api/v1`) so any external app can list conversations, fetch paginated chat history, send SMS, and manage contacts/templates (full CRUD). See **[API.md](API.md)** for the reference with curl examples, and **[openapi.yaml](openapi.yaml)** (OpenAPI 3.0) to import into Postman/Insomnia or generate clients.
+
+Optional authentication: start the server with `API_KEY=my-secret bash start.sh` and every API request must send `Authorization: Bearer my-secret`. The dashboard asks for the key once and remembers it.
+
 ## Configuration
 
-Environment variables (optional): `PORT` (default 8080), `DB_PATH` (SQLite location), `SIM_SLOT` (SIM slot for dual-SIM phones, e.g. `0` or `1`), `SYNC_INTERVAL` (seconds between syncs, default 10), `RECENT_LIMIT` (messages per incremental sync, default 100), `BACKFILL_CHUNK` (messages per backfill page, default 400), `CONV_LIMIT` (recent conversations shown, default 25; `0` = all — old chats are hidden from the list but still searchable).
+Environment variables (optional): `PORT` (default 8080), `DB_PATH` (SQLite location), `API_KEY` (require Bearer auth on the API), `SIM_SLOT` (SIM slot for dual-SIM phones, e.g. `0` or `1`), `SYNC_INTERVAL` (seconds between syncs, default 10), `RECENT_LIMIT` (messages per incremental sync, default 100), `BACKFILL_CHUNK` (messages per backfill page, default 400), `CONV_LIMIT` (recent conversations shown, default 25; `0` = all — old chats are hidden from the list but still searchable).
 
 Note: the dashboard UI is in Spanish.

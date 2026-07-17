@@ -40,8 +40,38 @@ SIM_SLOT = os.environ.get("SIM_SLOT", "").strip()  # dual-SIM: set to 0 or 1 if 
 SYNC_INTERVAL = int(os.environ.get("SYNC_INTERVAL", "10"))  # seconds between incremental syncs
 RECENT_LIMIT = int(os.environ.get("RECENT_LIMIT", "100"))  # messages fetched per incremental sync
 BACKFILL_CHUNK = int(os.environ.get("BACKFILL_CHUNK", "400"))  # messages per backfill page
+API_KEY = os.environ.get("API_KEY", "").strip()  # if set, /api requires Authorization: Bearer <key>
 
 app = Flask(__name__, static_folder=None)
+
+
+# ---------------------------------------------------------------------------
+# Auth (optional) + CORS, so external apps can integrate with the API
+# ---------------------------------------------------------------------------
+
+@app.before_request
+def check_auth():
+    if request.method == "OPTIONS":  # CORS preflight must pass
+        return None
+    if not API_KEY or not request.path.startswith("/api"):
+        return None
+    auth = request.headers.get("Authorization", "")
+    if auth == f"Bearer {API_KEY}" or request.args.get("api_key") == API_KEY:
+        return None
+    return jsonify({"error": "Unauthorized: send 'Authorization: Bearer <API_KEY>'"}), 401
+
+
+@app.after_request
+def add_cors(resp):
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    return resp
+
+
+@app.route("/api/<path:_sub>", methods=["OPTIONS"])
+def cors_preflight(_sub):
+    return ("", 204)
 
 # ---------------------------------------------------------------------------
 # Database
@@ -307,13 +337,15 @@ def get_merged_messages():
         msgs.append({
             "number": r["number"], "key": r["number_key"], "body": r["body"],
             "type": r["type"], "date": r["date"], "read": bool(r["read"]),
+            "id": None, "source": "phone",  # phone SMS can't be deleted via the API
         })
-    for s in db.execute("SELECT number, number_key, body, sent_at FROM sent_messages"):
+    for s in db.execute("SELECT id, number, number_key, body, sent_at FROM sent_messages"):
         if (s["number_key"], s["body"].strip()) in phone_sent:
             continue
         msgs.append({
             "number": s["number"], "key": s["number_key"], "body": s["body"],
             "type": "sent", "date": s["sent_at"], "read": True,
+            "id": s["id"], "source": "local",
         })
     return msgs
 
@@ -335,6 +367,7 @@ CONV_LIMIT = int(os.environ.get("CONV_LIMIT", "25"))  # most-recent conversation
 
 
 @app.route("/api/conversations")
+@app.route("/api/v1/conversations")
 def conversations():
     """Most recent conversations (default: last CONV_LIMIT contacts talked to).
 
@@ -367,13 +400,11 @@ def conversations():
     return jsonify(result)
 
 
-@app.route("/api/messages")
-def messages():
+def _chat_messages(number):
     """Paginated chat history. Returns the newest `limit` messages by
     default; `offset` counts backwards from the newest (offset=20 skips
-    the 20 most recent), so the UI can load older pages while scrolling up.
+    the 20 most recent), so clients can load older pages while scrolling up.
     """
-    number = request.args.get("number", "")
     key = normalize_number(number)
     if not key:
         return jsonify({"error": "Falta el parámetro number"}), 400
@@ -383,7 +414,8 @@ def messages():
     except ValueError:
         limit, offset = 20, 0
     msgs = [
-        {"body": m["body"], "type": m["type"], "date": m["date"], "read": m["read"]}
+        {"id": m["id"], "source": m["source"], "body": m["body"],
+         "type": m["type"], "date": m["date"], "read": m["read"]}
         for m in get_merged_messages() if m["key"] == key
     ]
     msgs.sort(key=lambda m: m["date"])
@@ -394,16 +426,31 @@ def messages():
         "messages": msgs[start:end],
         "total": total,
         "has_more": start > 0,
+        "limit": limit,
+        "offset": offset,
     })
 
 
+@app.route("/api/messages")
+def messages_legacy():
+    return _chat_messages(request.args.get("number", ""))
+
+
+@app.route("/api/v1/conversations/<path:number>/messages")
+def chat_messages_v1(number):
+    return _chat_messages(number)
+
+
 @app.route("/api/send", methods=["POST"])
+@app.route("/api/v1/messages", methods=["POST"])
 def send_sms():
+    """Sends an SMS. Body: {"to": "+1787...", "body": "text"}
+    (legacy keys "number"/"message" also accepted)."""
     payload = request.get_json(force=True, silent=True) or {}
-    number = (payload.get("number") or "").strip()
-    message = (payload.get("message") or "").strip()
+    number = (payload.get("to") or payload.get("number") or "").strip()
+    message = (payload.get("body") or payload.get("message") or "").strip()
     if not number or not message:
-        return jsonify({"error": "Se requiere número y mensaje"}), 400
+        return jsonify({"error": "Se requiere 'to' (número) y 'body' (mensaje)"}), 400
     cmd = ["termux-sms-send", "-n", number]
     if SIM_SLOT:
         cmd += ["-s", SIM_SLOT]
@@ -414,15 +461,31 @@ def send_sms():
     # record the sent message locally: Android usually won't let us write to
     # the system SMS store, so termux-sms-list may never show it
     db = get_db()
-    db.execute(
+    cur = db.execute(
         "INSERT INTO sent_messages (number, number_key, body) VALUES (?, ?, ?)",
         (number, normalize_number(number), message),
     )
     db.commit()
+    return jsonify({"ok": True, "id": cur.lastrowid, "to": number}), 201
+
+
+@app.route("/api/v1/messages/<int:mid>", methods=["DELETE"])
+def delete_message(mid):
+    """Deletes a locally-recorded sent message (source='local' only).
+
+    Phone SMS cannot be deleted through Termux — Android restricts SMS
+    store writes to the default SMS app.
+    """
+    db = get_db()
+    cur = db.execute("DELETE FROM sent_messages WHERE id=?", (mid,))
+    db.commit()
+    if cur.rowcount == 0:
+        return jsonify({"error": "No existe, o es un SMS del teléfono (source='phone') que no se puede borrar vía API"}), 404
     return jsonify({"ok": True})
 
 
 @app.route("/api/search")
+@app.route("/api/v1/search")
 def search():
     q = (request.args.get("q") or "").strip()
     terms = [fold(t) for t in q.split() if t.strip()]
@@ -457,6 +520,7 @@ def search():
 # ---------------------------------------------------------------------------
 
 @app.route("/api/templates", methods=["GET", "POST"])
+@app.route("/api/v1/templates", methods=["GET", "POST"])
 def templates():
     db = get_db()
     if request.method == "GET":
@@ -472,9 +536,15 @@ def templates():
     return jsonify({"ok": True, "id": cur.lastrowid})
 
 
-@app.route("/api/templates/<int:tid>", methods=["PUT", "DELETE"])
+@app.route("/api/templates/<int:tid>", methods=["GET", "PUT", "DELETE"])
+@app.route("/api/v1/templates/<int:tid>", methods=["GET", "PUT", "DELETE"])
 def template_item(tid):
     db = get_db()
+    if request.method == "GET":
+        row = db.execute("SELECT * FROM templates WHERE id=?", (tid,)).fetchone()
+        if not row:
+            return jsonify({"error": "Template no encontrado"}), 404
+        return jsonify(dict(row))
     if request.method == "DELETE":
         db.execute("DELETE FROM templates WHERE id=?", (tid,))
         db.commit()
@@ -493,6 +563,7 @@ def template_item(tid):
 # ---------------------------------------------------------------------------
 
 @app.route("/api/contacts", methods=["GET", "POST"])
+@app.route("/api/v1/contacts", methods=["GET", "POST"])
 def contacts():
     db = get_db()
     if request.method == "GET":
@@ -512,9 +583,15 @@ def contacts():
     return jsonify({"ok": True, "id": cur.lastrowid})
 
 
-@app.route("/api/contacts/<int:cid>", methods=["PUT", "DELETE"])
+@app.route("/api/contacts/<int:cid>", methods=["GET", "PUT", "DELETE"])
+@app.route("/api/v1/contacts/<int:cid>", methods=["GET", "PUT", "DELETE"])
 def contact_item(cid):
     db = get_db()
+    if request.method == "GET":
+        row = db.execute("SELECT * FROM contacts WHERE id=?", (cid,)).fetchone()
+        if not row:
+            return jsonify({"error": "Contacto no encontrado"}), 404
+        return jsonify(dict(row))
     if request.method == "DELETE":
         db.execute("DELETE FROM contacts WHERE id=?", (cid,))
         db.commit()
@@ -529,6 +606,7 @@ def contact_item(cid):
 
 
 @app.route("/api/contacts/import", methods=["POST"])
+@app.route("/api/v1/contacts/import", methods=["POST"])
 def import_contacts():
     """Imports phone contacts (termux-contact-list) that don't exist yet.
 
@@ -561,6 +639,7 @@ def import_contacts():
 
 
 @app.route("/api/debug")
+@app.route("/api/v1/debug")
 def debug():
     """Live diagnostics for sync problems.
 
@@ -586,6 +665,7 @@ def debug():
 
 
 @app.route("/api/status")
+@app.route("/api/v1/status")
 def status():
     """Diagnostics: sync health, cache size, backfill progress."""
     db = get_db()

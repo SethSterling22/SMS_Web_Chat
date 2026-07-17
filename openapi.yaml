@@ -1,0 +1,424 @@
+openapi: 3.0.3
+info:
+  title: SMS Web Chat API
+  description: >
+    REST API for sending and reading SMS through an Android phone running
+    Termux + Termux:API. The server keeps a local SQLite cache of the phone's
+    SMS store (synced in the background) plus its own record of sent messages.
+    Note: RCS ("chat features") messages are not in Android's SMS store and
+    cannot be served by this API.
+  version: "1.0.0"
+servers:
+  - url: http://{host}:{port}/api/v1
+    variables:
+      host:
+        default: localhost
+        description: Phone IP (Tailscale or LAN)
+      port:
+        default: "8080"
+security:
+  - bearerAuth: []
+  - {}
+paths:
+  /messages:
+    post:
+      summary: Send an SMS
+      operationId: sendMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to, body]
+              properties:
+                to:
+                  type: string
+                  description: Destination phone number, any format
+                  example: "+17875551234"
+                body:
+                  type: string
+                  description: Message text
+                  example: "Su estudio está listo"
+      responses:
+        "201":
+          description: Sent and recorded locally
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  id: { type: integer, description: Local record id (deletable) }
+                  to: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/ServerError" }
+  /messages/{id}:
+    delete:
+      summary: Delete a locally-recorded sent message
+      description: Only messages with source "local" can be deleted. Phone SMS cannot be deleted by third-party apps.
+      operationId: deleteMessage
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /conversations:
+    get:
+      summary: List recent conversations
+      operationId: listConversations
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 25 }
+          description: Max conversations returned, newest first. 0 = all.
+      responses:
+        "200":
+          description: Conversations sorted by last message date, descending
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Conversation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /conversations/{number}/messages:
+    get:
+      summary: Get a chat's messages (paginated from the newest)
+      operationId: getChatMessages
+      parameters:
+        - name: number
+          in: path
+          required: true
+          schema: { type: string }
+          description: Phone number in any format (matched by last 10 digits)
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20, maximum: 500 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+          description: Counts backwards from the newest message (offset=20 skips the latest 20)
+      responses:
+        "200":
+          description: Page of messages, oldest to newest within the page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items: { $ref: "#/components/schemas/Message" }
+                  total: { type: integer }
+                  has_more: { type: boolean }
+                  limit: { type: integer }
+                  offset: { type: integer }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /search:
+    get:
+      summary: Search messages and contacts
+      description: Accent-insensitive; all whitespace-separated terms must match. Covers the entire history.
+      operationId: search
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Matches (messages capped at 50, newest first)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items: { $ref: "#/components/schemas/SearchMessage" }
+                  contacts:
+                    type: array
+                    items: { $ref: "#/components/schemas/Contact" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /contacts:
+    get:
+      summary: List contacts
+      operationId: listContacts
+      responses:
+        "200":
+          description: All contacts, sorted by name
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Contact" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      summary: Create a contact
+      operationId: createContact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, number]
+              properties:
+                name: { type: string }
+                number: { type: string }
+                notes: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/OkWithId" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /contacts/{id}:
+    get:
+      summary: Get a contact
+      operationId: getContact
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: The contact
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Contact" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      summary: Update a contact
+      operationId: updateContact
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                number: { type: string }
+                notes: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      summary: Delete a contact
+      operationId: deleteContact
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /contacts/import:
+    post:
+      summary: Import the phone's contacts
+      description: Adds phone contacts not already present (deduplicated by the last 10 digits of the number).
+      operationId: importContacts
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  imported: { type: integer }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/ServerError" }
+  /templates:
+    get:
+      summary: List message templates
+      operationId: listTemplates
+      responses:
+        "200":
+          description: All templates
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Template" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      summary: Create a template
+      operationId: createTemplate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, body]
+              properties:
+                name: { type: string }
+                body: { type: string, description: "May contain variables like {nombre}" }
+      responses:
+        "200": { $ref: "#/components/responses/OkWithId" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /templates/{id}:
+    get:
+      summary: Get a template
+      operationId: getTemplate
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: The template
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Template" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      summary: Update a template
+      operationId: updateTemplate
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                body: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      summary: Delete a template
+      operationId: deleteTemplate
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /status:
+    get:
+      summary: Server and sync status
+      operationId: getStatus
+      responses:
+        "200":
+          description: Health and sync info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  server: { type: string }
+                  termux_api: { type: string, enum: [ok, error] }
+                  detail: { type: string, nullable: true }
+                  sms_count: { type: integer }
+                  local_sent_count: { type: integer }
+                  last_sync: { type: string, nullable: true }
+                  backfill_done: { type: boolean }
+                  backfill_offset: { type: integer }
+                  sync_interval: { type: integer }
+                  sim_slot: { type: string, nullable: true }
+                  time: { type: string }
+  /debug:
+    get:
+      summary: Live diagnostics
+      description: Compares a live termux-sms-list read against the newest cached messages, to tell RCS-invisible messages apart from sync bugs.
+      operationId: getDebug
+      responses:
+        "200":
+          description: Diagnostic payload
+          content:
+            application/json:
+              schema: { type: object }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Required only if the server sets the API_KEY environment variable
+  schemas:
+    Conversation:
+      type: object
+      properties:
+        number: { type: string, example: "+17875551234" }
+        key: { type: string, description: Last 10 digits, canonical id, example: "7875551234" }
+        name: { type: string, nullable: true }
+        last_message: { type: string }
+        last_date: { type: string, example: "2026-07-17 09:20" }
+        unread: { type: integer }
+        count: { type: integer }
+    Message:
+      type: object
+      properties:
+        id: { type: integer, nullable: true, description: Only for source "local" }
+        source: { type: string, enum: [phone, local] }
+        type: { type: string, enum: [inbox, sent, draft, outbox] }
+        body: { type: string }
+        date: { type: string, example: "2026-07-17 09:15" }
+        read: { type: boolean }
+    SearchMessage:
+      type: object
+      properties:
+        number: { type: string }
+        name: { type: string, nullable: true }
+        body: { type: string }
+        type: { type: string }
+        date: { type: string }
+    Contact:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        number: { type: string }
+        notes: { type: string }
+        created_at: { type: string }
+        updated_at: { type: string }
+    Template:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        body: { type: string }
+        created_at: { type: string }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+  responses:
+    Ok:
+      description: Success
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean }
+    OkWithId:
+      description: Created
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean }
+              id: { type: integer }
+    BadRequest:
+      description: Missing or invalid parameters
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ServerError:
+      description: Termux/phone error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
