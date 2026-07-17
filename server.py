@@ -331,8 +331,19 @@ def index():
 # API: conversations and messages (read from cache only — fast)
 # ---------------------------------------------------------------------------
 
+CONV_LIMIT = int(os.environ.get("CONV_LIMIT", "25"))  # most-recent conversations shown
+
+
 @app.route("/api/conversations")
 def conversations():
+    """Most recent conversations (default: last CONV_LIMIT contacts talked to).
+
+    Pass ?limit=0 for all conversations. Search still covers everything.
+    """
+    try:
+        limit = int(request.args.get("limit", CONV_LIMIT))
+    except ValueError:
+        limit = CONV_LIMIT
     names = contact_names()
     convs = {}
     for m in get_merged_messages():
@@ -351,6 +362,8 @@ def conversations():
         if m["type"] == "inbox" and not m["read"]:
             c["unread"] += 1
     result = sorted(convs.values(), key=lambda c: c["last_date"], reverse=True)
+    if limit > 0:
+        result = result[:limit]
     return jsonify(result)
 
 
@@ -545,6 +558,31 @@ def import_contacts():
         added += 1
     db.commit()
     return jsonify({"ok": True, "imported": added})
+
+
+@app.route("/api/debug")
+def debug():
+    """Live diagnostics for sync problems.
+
+    Compares what termux-sms-list returns RIGHT NOW against the newest
+    cached messages. If a message you just received does not appear in
+    'live_sample', it is not in Android's SMS store at all — almost always
+    because the conversation uses RCS ('chat features'), which no
+    third-party app can read. That is a phone setting, not a sync bug.
+    """
+    ok, raw = fetch_chunk(10, 0)
+    db = get_db()
+    newest = db.execute(
+        "SELECT date, type, number, substr(body, 1, 60) AS body FROM messages ORDER BY date DESC LIMIT 5"
+    ).fetchall()
+    return jsonify({
+        "live_ok": ok,
+        "live_sample_newest_10": raw if ok else None,
+        "live_error": None if ok else raw,
+        "variant_flags": _caps["idx"],
+        "sync": dict(_sync_status),
+        "newest_5_cached": [dict(r) for r in newest],
+    })
 
 
 @app.route("/api/status")

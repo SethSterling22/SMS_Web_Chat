@@ -111,12 +111,13 @@ Conversations are grouped by the **last 10 digits** of the number, so `+1 787 55
 | Sending fails or nothing arrives (dual-SIM phones) | Set the SIM slot: `SIM_SLOT=0 bash start.sh` (or `SIM_SLOT=1`) |
 | Sending silently does nothing | Grant Termux:API full SMS, Contacts AND Phone permissions in Android settings |
 | Old chats incomplete right after starting | The initial backfill is still running; check `backfill_done` in `/api/status` |
-| Replies you sent from the phone's Messages app are missing | If the chat uses **RCS** ("chat features" in Google Messages), those messages are NOT in Android's SMS store and no third-party app can read them. Turn off RCS/chat features in the Messages app settings to make new conversations go over SMS. Messages sent from this dashboard are always recorded. |
+| Replies you sent from the phone's Messages app are missing, or new incoming messages never appear | Almost always **RCS** ("chat features"). RCS messages travel over the internet (WiFi/data) and are NOT stored in Android's SMS database — no third-party app can read them. Confirm with `/api/debug`: if a message you just received isn't in `live_sample_newest_10`, it's RCS. Fix: turn off RCS — Google Messages: profile photo → Messages settings → RCS chats → off. Samsung Messages: Settings → Chat settings → off. Conversations then fall back to real SMS and sync fully. Messages sent from this dashboard are always recorded. |
+| Sync stops when the screen is off (Samsung especially) | Set BOTH Termux and Termux:API to Battery → Unrestricted, and disable "Put unused apps to sleep" for them (Settings → Battery → Background usage limits) |
 
 Visit `/api/status` for diagnostics (cache size, backfill progress, last sync, errors).
 
 ## Configuration
 
-Environment variables (optional): `PORT` (default 8080), `DB_PATH` (SQLite location), `SIM_SLOT` (SIM slot for dual-SIM phones, e.g. `0` or `1`), `SYNC_INTERVAL` (seconds between syncs, default 10), `RECENT_LIMIT` (messages per incremental sync, default 100), `BACKFILL_CHUNK` (messages per backfill page, default 400).
+Environment variables (optional): `PORT` (default 8080), `DB_PATH` (SQLite location), `SIM_SLOT` (SIM slot for dual-SIM phones, e.g. `0` or `1`), `SYNC_INTERVAL` (seconds between syncs, default 10), `RECENT_LIMIT` (messages per incremental sync, default 100), `BACKFILL_CHUNK` (messages per backfill page, default 400), `CONV_LIMIT` (recent conversations shown, default 25; `0` = all — old chats are hidden from the list but still searchable).
 
 Note: the dashboard UI is in Spanish.
