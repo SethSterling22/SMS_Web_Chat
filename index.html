@@ -269,11 +269,16 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   renderSidebar();
 });
 
+let convLimit = 25;  // grows with the "load more chats" button
 async function loadConversations() {
   try {
-    conversationsCache = await api('/api/conversations');
+    conversationsCache = await api('/api/conversations?limit=' + convLimit);
     if (currentTab === 'chats' && !$('searchInput').value) renderSidebar();
   } catch(e) { /* status dot already reports it */ }
+}
+async function loadMoreChats() {
+  convLimit += 25;
+  await loadConversations();
 }
 async function loadContacts() {
   contactsCache = await api('/api/contacts');
@@ -291,7 +296,11 @@ function renderSidebar() {
         <div class="conv-top"><span class="conv-name">${esc(display)}${c.unread?`<span class="badge">${c.unread}</span>`:''}</span>
         <span class="conv-date">${fmtDate(c.last_date)}</span></div>
         <div class="conv-preview">${esc(c.last_message)}</div></div>`;
-    }).join('');
+    }).join('')
+    // if we got as many as we asked for, there are probably older chats
+    + (conversationsCache.length >= convLimit
+        ? `<div style="padding:10px 14px"><button class="btn secondary" style="width:100%" onclick="loadMoreChats()">Cargar más chats</button></div>`
+        : '');
   } else {
     const items = contactsCache.map(c =>
       `<div class="conv" onclick="openContactModal(${c.id})">
