@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SMS Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #1a2029; --panel2: #222a35; --border: #2e3844;
+    --text: #e6edf3; --muted: #8b98a5; --accent: #3b82f6; --accent2: #2563eb;
+    --green: #22c55e; --red: #ef4444; --bubble-in: #2a3441; --bubble-out: #1d4ed8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); height: 100vh; overflow: hidden; }
+  .app { display: grid; grid-template-columns: 340px 1fr; height: 100vh; }
+
+  /* ---------- Sidebar ---------- */
+  .sidebar { background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+  .sidebar-header { padding: 14px; border-bottom: 1px solid var(--border); }
+  .sidebar-header h1 { font-size: 17px; margin-bottom: 10px; display:flex; align-items:center; gap:8px; }
+  .status-dot { width:9px; height:9px; border-radius:50%; background: var(--muted); display:inline-block; }
+  .status-dot.ok { background: var(--green); } .status-dot.err { background: var(--red); }
+  .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+  .tab { flex:1; padding: 7px 0; text-align:center; background: var(--panel2); border:1px solid var(--border); border-radius: 8px; cursor:pointer; font-size:13px; color: var(--muted); }
+  .tab.active { background: var(--accent); color:#fff; border-color: var(--accent); }
+  .search-box input { width: 100%; padding: 9px 12px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; outline: none; }
+  .search-box input:focus { border-color: var(--accent); }
+  .sidebar-list { flex: 1; overflow-y: auto; }
+  .conv { padding: 12px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .conv:hover { background: var(--panel2); }
+  .conv.active { background: var(--panel2); border-left: 3px solid var(--accent); padding-left: 11px; }
+  .conv-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .conv-name { font-weight: 600; font-size: 14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .conv-date { font-size: 11px; color: var(--muted); flex-shrink: 0; }
+  .conv-preview { font-size: 12.5px; color: var(--muted); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { background: var(--accent); color: #fff; font-size: 11px; border-radius: 10px; padding: 1px 7px; margin-left: 6px; }
+  .sidebar-footer { padding: 10px; border-top: 1px solid var(--border); display:flex; gap:8px; }
+  .btn { padding: 9px 14px; background: var(--accent); color: #fff; border: none; border-radius: 8px; cursor: pointer; font-size: 13.5px; font-weight: 500; }
+  .btn:hover { background: var(--accent2); }
+  .btn.secondary { background: var(--panel2); border: 1px solid var(--border); color: var(--text); }
+  .btn.small { padding: 5px 10px; font-size: 12px; }
+  .btn.danger { background: transparent; border:1px solid var(--red); color: var(--red); }
+  .btn.full { flex: 1; }
+
+  /* ---------- Main ---------- */
+  .main { display: flex; flex-direction: column; height: 100vh; background: var(--bg); }
+  .chat-header { padding: 13px 18px; border-bottom: 1px solid var(--border); background: var(--panel); display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
+  .chat-title { font-weight: 600; font-size: 15px; }
+  .chat-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .messages { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 8px; }
+  .bubble { max-width: 62%; padding: 9px 13px; border-radius: 14px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; position: relative; }
+  .bubble.in { background: var(--bubble-in); align-self: flex-start; border-bottom-left-radius: 4px; }
+  .bubble.out { background: var(--bubble-out); align-self: flex-end; border-bottom-right-radius: 4px; }
+  .bubble .meta { display: block; font-size: 10.5px; color: rgba(255,255,255,.55); margin-top: 4px; text-align: right; }
+  .bubble .copy { position: absolute; top: 4px; right: 6px; font-size: 11px; cursor: pointer; opacity: 0; transition: opacity .15s; color: rgba(255,255,255,.7); }
+  .bubble:hover .copy { opacity: 1; }
+  .composer { padding: 12px 16px; border-top: 1px solid var(--border); background: var(--panel); display: flex; gap: 10px; align-items: flex-end; }
+  .composer textarea { flex: 1; padding: 10px 13px; background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-size: 14px; resize: none; outline: none; max-height: 140px; font-family: inherit; }
+  .composer textarea:focus { border-color: var(--accent); }
+  .empty-state { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; color: var(--muted); gap: 10px; }
+  .empty-state .big { font-size: 42px; }
+
+  /* ---------- Modals ---------- */
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; z-index: 50; }
+  .overlay.show { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; width: min(560px, 92vw); max-height: 84vh; display: flex; flex-direction: column; }
+  .modal-header { padding: 15px 18px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
+  .modal-body { padding: 16px 18px; overflow-y: auto; }
+  .modal .close { cursor: pointer; color: var(--muted); font-size: 20px; background:none; border:none; }
+  label { display: block; font-size: 12.5px; color: var(--muted); margin: 10px 0 4px; }
+  .modal input, .modal textarea { width: 100%; padding: 9px 12px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; outline: none; font-family: inherit; }
+  .modal textarea { min-height: 80px; resize: vertical; }
+  .modal input:focus, .modal textarea:focus { border-color: var(--accent); }
+  .list-item { padding: 11px 12px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 9px; background: var(--panel2); }
+  .list-item .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .list-item .title { font-weight: 600; font-size: 14px; }
+  .list-item .sub { font-size: 12.5px; color: var(--muted); margin-top: 3px; white-space: pre-wrap; }
+  .actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+
+  /* templates dropdown in composer */
+  .tpl-menu { position: absolute; bottom: 70px; left: 16px; right: 90px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; max-height: 260px; overflow-y: auto; display: none; z-index: 40; box-shadow: 0 8px 30px rgba(0,0,0,.4); }
+  .tpl-menu.show { display: block; }
+  .tpl-menu .item { padding: 10px 14px; cursor: pointer; border-bottom: 1px solid var(--border); }
+  .tpl-menu .item:hover { background: var(--panel2); }
+  .tpl-menu .item .name { font-weight: 600; font-size: 13px; }
+  .tpl-menu .item .preview { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--border); padding: 10px 18px; border-radius: 10px; font-size: 13.5px; display: none; z-index: 100; }
+  .toast.show { display: block; }
+  .toast.error { border-color: var(--red); color: #fca5a5; }
+
+  .search-result-section { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; padding: 10px 14px 4px; }
+  ::-webkit-scrollbar { width: 8px; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- ============ SIDEBAR ============ -->
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <h1><span class="status-dot" id="statusDot"></span> SMS Dashboard</h1>
+      <div class="tabs">
+        <div class="tab active" data-tab="chats">Chats</div>
+        <div class="tab" data-tab="contacts">Contactos</div>
+      </div>
+      <div class="search-box"><input id="searchInput" placeholder="Buscar mensajes, contactos, notas…"></div>
+    </div>
+    <div class="sidebar-list" id="sidebarList"></div>
+    <div class="sidebar-footer">
+      <button class="btn full" onclick="openNewChat()">✚ Nuevo chat</button>
+      <button class="btn secondary full" onclick="openTemplates()">Templates</button>
+    </div>
+  </div>
+
+  <!-- ============ MAIN ============ -->
+  <div class="main">
+    <div class="chat-header">
+      <div>
+        <div class="chat-title" id="chatTitle">Selecciona una conversación</div>
+        <div class="chat-sub" id="chatSub"></div>
+      </div>
+      <div class="actions" id="chatActions" style="display:none">
+        <button class="btn small secondary" onclick="openContactForNumber()">Contacto / Notas</button>
+      </div>
+    </div>
+    <div class="messages" id="messages">
+      <div class="empty-state"><div class="big">💬</div><div>Elige un chat a la izquierda o crea uno nuevo</div></div>
+    </div>
+    <div class="tpl-menu" id="tplMenu"></div>
+    <div class="composer" id="composer" style="display:none">
+      <button class="btn secondary" title="Insertar template" onclick="toggleTplMenu()">📋</button>
+      <textarea id="msgInput" rows="1" placeholder="Escribe un mensaje… (Enter para enviar, Shift+Enter para nueva línea)"></textarea>
+      <button class="btn" id="sendBtn" onclick="sendMessage()">Enviar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: templates ============ -->
+<div class="overlay" id="tplOverlay">
+  <div class="modal">
+    <div class="modal-header">Templates de mensajes <button class="close" onclick="hide('tplOverlay')">✕</button></div>
+    <div class="modal-body">
+      <div id="tplList"></div>
+      <label>Nombre del template</label>
+      <input id="tplName" placeholder="Ej: Recordatorio de cita">
+      <label>Texto</label>
+      <textarea id="tplBody" placeholder="Hola {nombre}, le recordamos su cita el {fecha}…"></textarea>
+      <div class="hint">Puedes usar variables como {nombre} — al insertar el template, se reemplaza con el nombre del contacto si existe; otras variables se editan antes de enviar.</div>
+      <div style="margin-top:12px; display:flex; gap:8px;">
+        <button class="btn" onclick="saveTemplate()">Guardar template</button>
+        <button class="btn secondary" id="tplCancelEdit" style="display:none" onclick="cancelTplEdit()">Cancelar edición</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: new chat ============ -->
+<div class="overlay" id="newChatOverlay">
+  <div class="modal">
+    <div class="modal-header">Nuevo chat <button class="close" onclick="hide('newChatOverlay')">✕</button></div>
+    <div class="modal-body">
+      <label>Número de teléfono</label>
+      <input id="ncNumber" placeholder="Ej: +52 55 1234 5678">
+      <label>Nombre (opcional — se guarda como contacto)</label>
+      <input id="ncName" placeholder="Nombre del contacto">
+      <div style="margin-top:14px;"><button class="btn" onclick="startNewChat()">Abrir chat</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: contact ============ -->
+<div class="overlay" id="contactOverlay">
+  <div class="modal">
+    <div class="modal-header"><span id="contactModalTitle">Contacto</span> <button class="close" onclick="hide('contactOverlay')">✕</button></div>
+    <div class="modal-body">
+      <input type="hidden" id="cId">
+      <label>Nombre</label>
+      <input id="cName">
+      <label>Número</label>
+      <input id="cNumber">
+      <label>Notas</label>
+      <textarea id="cNotes" placeholder="Notas sobre este contacto…"></textarea>
+      <div style="margin-top:14px; display:flex; gap:8px;">
+        <button class="btn" onclick="saveContact()">Guardar</button>
+        <button class="btn danger" id="cDeleteBtn" style="display:none" onclick="deleteContact()">Eliminar</button>
+        <button class="btn secondary" id="cChatBtn" style="display:none" onclick="chatFromContact()">Abrir chat</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ============================== state ==============================
+let currentTab = 'chats';
+let currentNumber = null;   // number of the currently open chat
+let currentName = null;
+let conversationsCache = [];
+let contactsCache = [];
+let templatesCache = [];
+let editingTplId = null;
+let pollTimer = null;
+let lastMsgSignature = '';
+
+const $ = id => document.getElementById(id);
+
+// ============================== helpers ==============================
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || ('Error ' + r.status));
+  return data;
+}
+function toast(msg, isError) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isError ? ' error' : '');
+  setTimeout(() => t.className = 'toast', 3000);
+}
+function esc(s) { return (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtDate(d) {
+  if (!d) return '';
+  const dt = new Date(d.replace(' ', 'T'));
+  if (isNaN(dt)) return d;
+  const now = new Date();
+  const sameDay = dt.toDateString() === now.toDateString();
+  return sameDay ? dt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})
+                 : dt.toLocaleDateString([], {day:'2-digit', month:'short'}) + ' ' + dt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+}
+function normNum(n) { return (n||'').toString().replace(/[^\d+]/g,''); }
+function nameFor(number) {
+  const key = normNum(number);
+  const c = contactsCache.find(c => normNum(c.number) === key);
+  return c ? c.name : null;
+}
+function show(id){ $(id).classList.add('show'); }
+function hide(id){ $(id).classList.remove('show'); }
+
+// ============================== status ==============================
+async function checkStatus() {
+  try {
+    const s = await api('/api/status');
+    $('statusDot').className = 'status-dot ' + (s.termux_api === 'ok' ? 'ok' : 'err');
+    if (s.termux_api !== 'ok') toast('Termux:API no responde: ' + (s.detail||''), true);
+  } catch(e) { $('statusDot').className = 'status-dot err'; }
+}
+
+// ============================== sidebar ==============================
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  currentTab = t.dataset.tab;
+  $('searchInput').value = '';
+  renderSidebar();
+});
+
+async function loadConversations() {
+  try {
+    conversationsCache = await api('/api/conversations');
+    if (currentTab === 'chats' && !$('searchInput').value) renderSidebar();
+  } catch(e) { /* status dot already reports it */ }
+}
+async function loadContacts() {
+  contactsCache = await api('/api/contacts');
+  if (currentTab === 'contacts' && !$('searchInput').value) renderSidebar();
+}
+async function loadTemplates() { templatesCache = await api('/api/templates'); }
+
+function renderSidebar() {
+  const list = $('sidebarList');
+  if (currentTab === 'chats') {
+    if (!conversationsCache.length) { list.innerHTML = '<div class="empty-state" style="padding:30px">Sin conversaciones aún</div>'; return; }
+    list.innerHTML = conversationsCache.map(c => {
+      const display = c.name || nameFor(c.number) || c.number;
+      return `<div class="conv ${normNum(c.number)===normNum(currentNumber)?'active':''}" onclick="openChat('${esc(c.number)}')">
+        <div class="conv-top"><span class="conv-name">${esc(display)}${c.unread?`<span class="badge">${c.unread}</span>`:''}</span>
+        <span class="conv-date">${fmtDate(c.last_date)}</span></div>
+        <div class="conv-preview">${esc(c.last_message)}</div></div>`;
+    }).join('');
+  } else {
+    const items = contactsCache.map(c =>
+      `<div class="conv" onclick="openContactModal(${c.id})">
+        <div class="conv-top"><span class="conv-name">${esc(c.name)}</span></div>
+        <div class="conv-preview">${esc(c.number)}${c.notes ? ' · ' + esc(c.notes) : ''}</div></div>`).join('');
+    list.innerHTML =
+      `<div style="padding:10px 14px; display:flex; gap:8px;">
+         <button class="btn small full" onclick="openContactModal(null)">✚ Agregar contacto</button>
+         <button class="btn small secondary full" onclick="importPhoneContacts()">Importar del teléfono</button>
+       </div>` + (items || '<div class="empty-state" style="padding:30px">Sin contactos guardados</div>');
+  }
+}
+
+// ============================== search ==============================
+let searchTimer = null;
+$('searchInput').addEventListener('input', e => {
+  clearTimeout(searchTimer);
+  const q = e.target.value.trim();
+  if (!q) { renderSidebar(); return; }
+  searchTimer = setTimeout(() => doSearch(q), 300);
+});
+async function doSearch(q) {
+  const res = await api('/api/search?q=' + encodeURIComponent(q));
+  const list = $('sidebarList');
+  let html = '';
+  if (res.contacts.length) {
+    html += '<div class="search-result-section">Contactos</div>';
+    html += res.contacts.map(c => `<div class="conv" onclick="openContactModal(${c.id})">
+      <div class="conv-top"><span class="conv-name">${esc(c.name)}</span></div>
+      <div class="conv-preview">${esc(c.number)}${c.notes ? ' · ' + esc(c.notes) : ''}</div></div>`).join('');
+  }
+  if (res.messages.length) {
+    html += '<div class="search-result-section">Mensajes</div>';
+    html += res.messages.map(m => `<div class="conv" onclick="openChat('${esc(m.number)}')">
+      <div class="conv-top"><span class="conv-name">${esc(m.name || m.number)}</span><span class="conv-date">${fmtDate(m.date)}</span></div>
+      <div class="conv-preview">${esc(m.body)}</div></div>`).join('');
+  }
+  list.innerHTML = html || '<div class="empty-state" style="padding:30px">Sin resultados</div>';
+}
+
+// ============================== chat ==============================
+async function openChat(number, name) {
+  currentNumber = number;
+  currentName = name || nameFor(number);
+  $('chatTitle').textContent = currentName || number;
+  $('chatSub').textContent = currentName ? number : '';
+  $('composer').style.display = 'flex';
+  $('chatActions').style.display = 'flex';
+  $('messages').innerHTML = '<div class="empty-state">Cargando…</div>';
+  lastMsgSignature = '';
+  await refreshMessages(true);
+  renderSidebar();
+  $('msgInput').focus();
+}
+
+async function refreshMessages(scroll) {
+  if (!currentNumber) return;
+  try {
+    const msgs = await api('/api/messages?number=' + encodeURIComponent(currentNumber));
+    const sig = msgs.length + '|' + (msgs.length ? msgs[msgs.length-1].date + msgs[msgs.length-1].body : '');
+    if (sig === lastMsgSignature) return;
+    lastMsgSignature = sig;
+    const box = $('messages');
+    box.innerHTML = msgs.length ? msgs.map(m =>
+      `<div class="bubble ${m.type === 'inbox' ? 'in' : 'out'}">
+        <span class="copy" title="Copiar" onclick="copyText(this)">⧉</span>${esc(m.body)}
+        <span class="meta">${fmtDate(m.date)}</span></div>`).join('')
+      : '<div class="empty-state">Sin mensajes aún — escribe el primero 👇</div>';
+    if (scroll !== false) box.scrollTop = box.scrollHeight;
+  } catch(e) { /* silent during polling */ }
+}
+
+function copyText(el) {
+  const bubble = el.parentElement.cloneNode(true);
+  bubble.querySelector('.copy').remove();
+  bubble.querySelector('.meta').remove();
+  navigator.clipboard.writeText(bubble.textContent.trim());
+  toast('Copiado al portapapeles');
+}
+
+async function sendMessage() {
+  const input = $('msgInput');
+  const text = input.value.trim();
+  if (!text || !currentNumber) return;
+  if (/\{[^}]+\}/.test(text) && !confirm('El mensaje contiene variables sin reemplazar (ej. {fecha}). ¿Enviar de todos modos?')) return;
+  $('sendBtn').disabled = true; $('sendBtn').textContent = '…';
+  try {
+    await api('/api/send', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ number: currentNumber, message: text }) });
+    input.value = ''; input.style.height = 'auto';
+    toast('Mensaje enviado');
+    setTimeout(() => { refreshMessages(); loadConversations(); }, 1500);
+  } catch(e) { toast('Error al enviar: ' + e.message, true); }
+  $('sendBtn').disabled = false; $('sendBtn').textContent = 'Enviar';
+}
+
+$('msgInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+$('msgInput').addEventListener('input', e => {
+  e.target.style.height = 'auto';
+  e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px';
+});
+
+// ============================== templates ==============================
+function toggleTplMenu() {
+  const menu = $('tplMenu');
+  if (menu.classList.contains('show')) { menu.classList.remove('show'); return; }
+  if (!templatesCache.length) { toast('No hay templates — créalos con el botón "Templates"'); return; }
+  menu.innerHTML = templatesCache.map(t =>
+    `<div class="item" onclick="insertTemplate(${t.id})"><div class="name">${esc(t.name)}</div><div class="preview">${esc(t.body)}</div></div>`).join('');
+  menu.classList.add('show');
+}
+function insertTemplate(id) {
+  const t = templatesCache.find(x => x.id === id);
+  if (!t) return;
+  let body = t.body;
+  const cname = currentName || nameFor(currentNumber);
+  if (cname) body = body.replaceAll('{nombre}', cname);
+  $('msgInput').value = body;
+  $('msgInput').dispatchEvent(new Event('input'));
+  $('tplMenu').classList.remove('show');
+  $('msgInput').focus();
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest('#tplMenu') && !e.target.closest('.composer .secondary')) $('tplMenu').classList.remove('show');
+});
+
+async function openTemplates() {
+  await loadTemplates();
+  renderTplList();
+  show('tplOverlay');
+}
+function renderTplList() {
+  $('tplList').innerHTML = templatesCache.map(t =>
+    `<div class="list-item"><div class="row"><span class="title">${esc(t.name)}</span>
+      <span class="actions">
+        <button class="btn small secondary" onclick="editTemplate(${t.id})">Editar</button>
+        <button class="btn small danger" onclick="deleteTemplate(${t.id})">Borrar</button>
+      </span></div>
+      <div class="sub">${esc(t.body)}</div></div>`).join('') || '<div class="hint">Aún no hay templates.</div>';
+}
+async function saveTemplate() {
+  const name = $('tplName').value.trim(), body = $('tplBody').value.trim();
+  if (!name || !body) { toast('Completa nombre y texto', true); return; }
+  try {
+    if (editingTplId) {
+      await api('/api/templates/' + editingTplId, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name, body}) });
+    } else {
+      await api('/api/templates', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name, body}) });
+    }
+    cancelTplEdit();
+    await loadTemplates(); renderTplList();
+    toast('Template guardado');
+  } catch(e) { toast(e.message, true); }
+}
+function editTemplate(id) {
+  const t = templatesCache.find(x => x.id === id);
+  editingTplId = id;
+  $('tplName').value = t.name; $('tplBody').value = t.body;
+  $('tplCancelEdit').style.display = 'inline-block';
+}
+function cancelTplEdit() {
+  editingTplId = null; $('tplName').value = ''; $('tplBody').value = '';
+  $('tplCancelEdit').style.display = 'none';
+}
+async function deleteTemplate(id) {
+  if (!confirm('¿Borrar este template?')) return;
+  await api('/api/templates/' + id, { method: 'DELETE' });
+  await loadTemplates(); renderTplList();
+}
+
+// ============================== new chat ==============================
+function openNewChat() { $('ncNumber').value = ''; $('ncName').value = ''; show('newChatOverlay'); $('ncNumber').focus(); }
+async function startNewChat() {
+  const number = $('ncNumber').value.trim();
+  const name = $('ncName').value.trim();
+  if (!number) { toast('Escribe un número', true); return; }
+  if (name) {
+    try { await api('/api/contacts', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name, number}) }); await loadContacts(); }
+    catch(e) {}
+  }
+  hide('newChatOverlay');
+  openChat(number, name || null);
+}
+
+// ============================== contacts ==============================
+function openContactModal(id) {
+  const c = id ? contactsCache.find(x => x.id === id) : null;
+  $('cId').value = c ? c.id : '';
+  $('cName').value = c ? c.name : '';
+  $('cNumber').value = c ? c.number : '';
+  $('cNotes').value = c ? (c.notes || '') : '';
+  $('contactModalTitle').textContent = c ? 'Editar contacto' : 'Nuevo contacto';
+  $('cDeleteBtn').style.display = c ? 'inline-block' : 'none';
+  $('cChatBtn').style.display = c ? 'inline-block' : 'none';
+  show('contactOverlay');
+}
+function openContactForNumber() {
+  if (!currentNumber) return;
+  const c = contactsCache.find(x => normNum(x.number) === normNum(currentNumber));
+  if (c) openContactModal(c.id);
+  else { openContactModal(null); $('cNumber').value = currentNumber; }
+}
+async function saveContact() {
+  const id = $('cId').value;
+  const payload = { name: $('cName').value.trim(), number: $('cNumber').value.trim(), notes: $('cNotes').value.trim() };
+  if (!payload.name || !payload.number) { toast('Completa nombre y número', true); return; }
+  try {
+    if (id) await api('/api/contacts/' + id, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    else await api('/api/contacts', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    hide('contactOverlay');
+    await loadContacts(); renderSidebar();
+    if (currentNumber && normNum(payload.number) === normNum(currentNumber)) {
+      currentName = payload.name; $('chatTitle').textContent = payload.name; $('chatSub').textContent = currentNumber;
+    }
+    toast('Contacto guardado');
+  } catch(e) { toast(e.message, true); }
+}
+async function deleteContact() {
+  const id = $('cId').value;
+  if (!id || !confirm('¿Eliminar este contacto? (No borra los mensajes)')) return;
+  await api('/api/contacts/' + id, { method: 'DELETE' });
+  hide('contactOverlay');
+  await loadContacts(); renderSidebar();
+}
+function chatFromContact() {
+  hide('contactOverlay');
+  document.querySelector('.tab[data-tab="chats"]').click();
+  openChat($('cNumber').value, $('cName').value);
+}
+async function importPhoneContacts() {
+  toast('Importando contactos del teléfono…');
+  try {
+    const r = await api('/api/contacts/import', { method: 'POST' });
+    await loadContacts(); renderSidebar();
+    toast(`Importados ${r.imported} contactos nuevos`);
+  } catch(e) { toast('Error: ' + e.message, true); }
+}
+
+// ============================== init & polling ==============================
+async function init() {
+  checkStatus();
+  await Promise.all([loadContacts(), loadTemplates()]);
+  await loadConversations();
+  pollTimer = setInterval(() => {
+    loadConversations();
+    refreshMessages();
+  }, 8000);
+  setInterval(checkStatus, 60000);
+}
+init();
+</script>
+</body>
+</html>
