@@ -86,6 +86,12 @@ The phone's Tailscale IP (starts with `100.`) is shown by `tailscale ip` or in t
 
 The server listens on all of the phone's interfaces. With Tailscale this is safe (only devices in your tailnet can reach it), but avoid using it on public WiFi without Tailscale. Nothing leaves the phone: SMS, contacts and notes stay local.
 
+## How sent messages are stored
+
+Android only allows the *default* SMS app to write to the system SMS store, so messages sent with `termux-sms-send` usually never appear in `termux-sms-list`. The server records every message you send in its own SQLite database (`dashboard.db`) and merges both sources when showing a chat, deduplicating when the phone did record the message.
+
+Conversations are grouped by the **last 10 digits** of the number, so `+1 787 555 1234` and `787-555-1234` show as a single chat.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -93,10 +99,13 @@ The server listens on all of the phone's interfaces. With Tailscale this is safe
 | Status dot is red / "Termux:API no responde" | Termux:API app missing, or no SMS permission |
 | `termux-sms-list` hangs | Termux and Termux:API installed from different sources (Play vs F-Droid) — both must be from F-Droid |
 | Page won't load from the PC | Check Tailscale is up on both devices and `start.sh` is running |
-| Sent messages don't show up | Wait a few seconds; history is read from Android's SMS log |
+| Sending fails or nothing arrives (dual-SIM phones) | Set the SIM slot: `SIM_SLOT=0 bash start.sh` (or `SIM_SLOT=1`) |
+| Sending silently does nothing | Check the Termux:API app has the SMS permission in Android settings |
+
+Visit `/api/status` for diagnostics (SMS count, flags in use, locally recorded sent messages).
 
 ## Configuration
 
-Environment variables (optional): `PORT` (default 8080), `SMS_LIMIT` (how many SMS to read, default 2000), `DB_PATH` (SQLite location).
+Environment variables (optional): `PORT` (default 8080), `SMS_LIMIT` (how many SMS to read, default 2000), `DB_PATH` (SQLite location), `SIM_SLOT` (SIM slot for dual-SIM phones, e.g. `0` or `1`).
 
 Note: the dashboard UI is in Spanish.
