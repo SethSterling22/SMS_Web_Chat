@@ -5,15 +5,22 @@ Exposes a web interface to send/read the phone's SMS using Termux:API.
 Run inside Termux:  python server.py
 Access from your PC: http://<phone-tailscale-ip>:8080
 
-Notes:
+Architecture:
+- A background sync worker copies the phone's SMS into a local SQLite cache:
+  * Backfill: on first run it pages through the ENTIRE history in chunks
+    (termux-sms-list -o offset), so old conversations are complete.
+  * Incremental: every SYNC_INTERVAL seconds it fetches only the most
+    recent messages and upserts them (cheap for the phone).
+- All API endpoints read from SQLite only — they never call termux-api
+  directly, so the UI is fast and the phone isn't hammered by requests.
 - Android only lets the *default* SMS app write to the system SMS store, so
   messages sent with termux-sms-send often never show up in termux-sms-list.
-  We keep our own copy of sent messages in SQLite and merge both sources.
-- Old/new versions of termux-sms-list need different flags (-d for dates,
-  -n for phone numbers); we probe several variants and remember the one
-  that works.
+  We record sent messages ourselves and merge them into chats.
+- Old/new versions of termux-sms-list need different flags (-d/-n, -t all);
+  we probe variants and remember the one that works.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -29,14 +36,15 @@ from flask import Flask, g, jsonify, request, send_from_directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "dashboard.db"))
 PORT = int(os.environ.get("PORT", "8080"))
-SMS_LIMIT = int(os.environ.get("SMS_LIMIT", "2000"))  # how many SMS to read from the phone
 SIM_SLOT = os.environ.get("SIM_SLOT", "").strip()  # dual-SIM: set to 0 or 1 if sending fails
-CACHE_TTL = 5  # seconds of cache for termux-sms-list (avoids repeated calls)
+SYNC_INTERVAL = int(os.environ.get("SYNC_INTERVAL", "10"))  # seconds between incremental syncs
+RECENT_LIMIT = int(os.environ.get("RECENT_LIMIT", "100"))  # messages fetched per incremental sync
+BACKFILL_CHUNK = int(os.environ.get("BACKFILL_CHUNK", "400"))  # messages per backfill page
 
 app = Flask(__name__, static_folder=None)
 
 # ---------------------------------------------------------------------------
-# Database (templates, external contacts with notes, locally-recorded sent SMS)
+# Database
 # ---------------------------------------------------------------------------
 
 SCHEMA = """
@@ -63,14 +71,37 @@ CREATE TABLE IF NOT EXISTS sent_messages (
     sent_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_sent_key ON sent_messages(number_key);
+-- local cache of the phone's SMS store, filled by the sync worker
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    msg_key TEXT UNIQUE NOT NULL,      -- dedupe hash (type|number|date|body)
+    number TEXT NOT NULL,
+    number_key TEXT NOT NULL,
+    body TEXT NOT NULL,
+    type TEXT NOT NULL,                -- inbox | sent | draft | outbox
+    date TEXT NOT NULL,
+    read INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_messages_key ON messages(number_key);
+CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date);
+CREATE TABLE IF NOT EXISTS sync_state (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
+
+
+def open_db():
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")  # web thread reads while sync thread writes
+    return con
 
 
 def get_db():
     db = getattr(g, "_db", None)
     if db is None:
-        db = g._db = sqlite3.connect(DB_PATH)
-        db.row_factory = sqlite3.Row
+        db = g._db = open_db()
     return db
 
 
@@ -82,22 +113,33 @@ def close_db(_exc):
 
 
 def init_db():
-    con = sqlite3.connect(DB_PATH)
+    con = open_db()
     con.executescript(SCHEMA)
     con.commit()
     con.close()
 
 
+def get_state(con, key, default=None):
+    row = con.execute("SELECT value FROM sync_state WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_state(con, key, value):
+    con.execute(
+        "INSERT INTO sync_state (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, str(value)),
+    )
+
+
 # ---------------------------------------------------------------------------
-# Termux helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
-def run_termux(cmd, timeout=30):
+def run_termux(cmd, timeout=60):
     """Runs a termux-* command and returns (ok, output)."""
     try:
-        out = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout
-        )
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if out.returncode != 0:
             return False, out.stderr.strip() or out.stdout.strip()
         return True, out.stdout
@@ -124,112 +166,156 @@ def fold(s):
     return unicodedata.normalize("NFD", str(s or "")).encode("ascii", "ignore").decode().lower()
 
 
-# --- termux-sms-list flag variants (older versions lack -d/-n or -t all) ---
-_LIST_VARIANTS = [
-    ["-t", "all", "-d", "-n"],  # preferred: all types, with dates and numbers
-    ["-t", "all"],
-    ["-d", "-n"],
-    [],
-]
-_variant_state = {"idx": None}
+# ---------------------------------------------------------------------------
+# Sync worker: phone SMS -> SQLite cache
+# ---------------------------------------------------------------------------
 
-_sms_cache = {"time": 0.0, "data": None}
-_sms_lock = threading.Lock()
+# flag variants for termux-sms-list, from newest to oldest style:
+#   0: -t all, with -d -n     2: split inbox/sent calls, with -d -n
+#   1: -t all, plain          3: split inbox/sent calls, plain
+_caps = {"idx": None}
+_sync_status = {"last_sync": None, "last_error": None, "backfill_done": False,
+                "backfill_offset": 0, "cached": 0}
 
 
-def fetch_sms_list():
-    """Tries flag variants until one returns valid JSON; remembers the winner."""
-    if _variant_state["idx"] is not None:
-        order = [_variant_state["idx"]] + [
-            i for i in range(len(_LIST_VARIANTS)) if i != _variant_state["idx"]
-        ]
+def _sms_list_call(extra, limit, offset):
+    cmd = ["termux-sms-list"] + extra + ["-l", str(limit), "-o", str(offset)]
+    ok, out = run_termux(cmd, timeout=120)
+    if not ok:
+        return False, out
+    try:
+        return True, (json.loads(out) if out.strip() else [])
+    except json.JSONDecodeError:
+        return False, "Respuesta inválida de termux-sms-list"
+
+
+def fetch_chunk(limit, offset):
+    """Fetches one page of SMS. offset 0 = most recent messages.
+
+    Probes flag variants on first use and remembers the working one.
+    """
+    if _caps["idx"] is not None:
+        order = [_caps["idx"]] + [i for i in range(4) if i != _caps["idx"]]
     else:
-        order = list(range(len(_LIST_VARIANTS)))
+        order = [0, 1, 2, 3]
     last_err = "termux-sms-list no respondió"
     for i in order:
-        cmd = ["termux-sms-list"] + _LIST_VARIANTS[i] + ["-l", str(SMS_LIMIT)]
-        ok, out = run_termux(cmd)
-        if not ok:
-            last_err = out
-            continue
-        try:
-            data = json.loads(out) if out.strip() else []
-        except json.JSONDecodeError:
-            last_err = "Respuesta inválida de termux-sms-list"
-            continue
-        _variant_state["idx"] = i
-        return True, data
+        dn = ["-d", "-n"] if i in (0, 2) else []
+        if i in (0, 1):
+            ok, data = _sms_list_call(dn + ["-t", "all"], limit, offset)
+            if ok:
+                _caps["idx"] = i
+                return True, data
+            last_err = data
+        else:
+            merged, failed = [], False
+            for tt in ("inbox", "sent"):
+                ok, data = _sms_list_call(dn + ["-t", tt], limit, offset)
+                if not ok:
+                    if tt == "inbox":  # inbox failing means these flags don't work
+                        failed, last_err = True, data
+                        break
+                    data = []  # tolerate versions without a 'sent' box
+                for m in data:
+                    m.setdefault("type", tt)
+                merged += data
+            if not failed:
+                _caps["idx"] = i
+                return True, merged
     return False, last_err
 
 
-def get_all_sms(force=False):
-    """Reads the phone's SMS (with a short cache)."""
-    with _sms_lock:
-        now = time.time()
-        if not force and _sms_cache["data"] is not None and now - _sms_cache["time"] < CACHE_TTL:
-            return True, _sms_cache["data"]
-        ok, data = fetch_sms_list()
-        if not ok:
-            return False, data
-        _sms_cache["time"] = now
-        _sms_cache["data"] = data
-        return True, data
+def upsert_messages(con, items):
+    """Inserts phone messages into the cache; updates read status on dupes."""
+    for m in items:
+        num = m.get("number") or m.get("sender") or ""
+        key = normalize_number(num)
+        if not key:
+            continue
+        body = m.get("body") or ""
+        mtype = m.get("type", "inbox")
+        date = m.get("received") or m.get("date") or ""
+        read = 1 if m.get("read", True) else 0
+        mk = hashlib.sha1(f"{mtype}|{key}|{date}|{body}".encode()).hexdigest()
+        con.execute(
+            "INSERT INTO messages (msg_key, number, number_key, body, type, date, read) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(msg_key) DO UPDATE SET read=excluded.read",
+            (mk, num, key, body, mtype, date, read),
+        )
 
 
-def invalidate_sms_cache():
-    with _sms_lock:
-        _sms_cache["data"] = None
+def sync_worker():
+    """Background loop: incremental sync of recent SMS + one-time backfill."""
+    con = open_db()
+    _sync_status["backfill_done"] = get_state(con, "backfill_done") == "1"
+    _sync_status["backfill_offset"] = int(get_state(con, "backfill_offset") or 0)
+    while True:
+        try:
+            # 1) incremental: newest messages (picks up replies and read status)
+            ok, data = fetch_chunk(RECENT_LIMIT, 0)
+            if ok:
+                upsert_messages(con, data)
+                con.commit()
+                _sync_status["last_sync"] = datetime.now().isoformat(timespec="seconds")
+                _sync_status["last_error"] = None
+            else:
+                _sync_status["last_error"] = data
 
+            # 2) backfill: page through older history until exhausted (one page
+            #    per cycle, so the phone never does heavy work in a burst)
+            if ok and not _sync_status["backfill_done"]:
+                off = _sync_status["backfill_offset"]
+                ok2, older = fetch_chunk(BACKFILL_CHUNK, off)
+                if ok2:
+                    upsert_messages(con, older)
+                    if len(older) < BACKFILL_CHUNK:
+                        _sync_status["backfill_done"] = True
+                        set_state(con, "backfill_done", "1")
+                    else:
+                        _sync_status["backfill_offset"] = off + BACKFILL_CHUNK
+                        set_state(con, "backfill_offset", off + BACKFILL_CHUNK)
+                    con.commit()
+            _sync_status["cached"] = con.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        except Exception as e:  # never let the worker die
+            _sync_status["last_error"] = str(e)
+        time.sleep(SYNC_INTERVAL)
+
+
+# ---------------------------------------------------------------------------
+# Merged view: cached phone SMS + locally recorded sent messages
+# ---------------------------------------------------------------------------
 
 def contact_names():
-    """Map of normalized_number -> name, from the external contacts database."""
     db = get_db()
     rows = db.execute("SELECT name, number FROM contacts").fetchall()
     return {normalize_number(r["number"]): r["name"] for r in rows}
 
 
 def get_merged_messages():
-    """Phone SMS merged with locally-recorded sent messages.
+    """All messages from the SQLite cache, merged with local sent copies.
 
     Local copies are skipped when the phone's SMS store already has a sent
     message with the same number and text (some devices do record them).
-    Returns (ok, list of {number, key, body, type, date, read}).
     """
-    ok, data = get_all_sms()
-    if not ok:
-        return False, data
+    db = get_db()
     msgs = []
     phone_sent = set()
-    for m in data:
-        num = m.get("number") or m.get("sender") or ""
-        key = normalize_number(num)
-        if not key:
-            continue
-        mtype = m.get("type", "inbox")
-        body = m.get("body") or ""
-        if mtype == "sent":
-            phone_sent.add((key, body.strip()))
+    for r in db.execute("SELECT number, number_key, body, type, date, read FROM messages"):
+        if r["type"] == "sent":
+            phone_sent.add((r["number_key"], r["body"].strip()))
         msgs.append({
-            "number": num,
-            "key": key,
-            "body": body,
-            "type": mtype,
-            "date": m.get("received") or m.get("date") or "",
-            "read": m.get("read", True),
+            "number": r["number"], "key": r["number_key"], "body": r["body"],
+            "type": r["type"], "date": r["date"], "read": bool(r["read"]),
         })
-    db = get_db()
     for s in db.execute("SELECT number, number_key, body, sent_at FROM sent_messages"):
         if (s["number_key"], s["body"].strip()) in phone_sent:
             continue
         msgs.append({
-            "number": s["number"],
-            "key": s["number_key"],
-            "body": s["body"],
-            "type": "sent",
-            "date": s["sent_at"],
-            "read": True,
+            "number": s["number"], "key": s["number_key"], "body": s["body"],
+            "type": "sent", "date": s["sent_at"], "read": True,
         })
-    return True, msgs
+    return msgs
 
 
 # ---------------------------------------------------------------------------
@@ -242,26 +328,18 @@ def index():
 
 
 # ---------------------------------------------------------------------------
-# API: conversations and messages
+# API: conversations and messages (read from cache only — fast)
 # ---------------------------------------------------------------------------
 
 @app.route("/api/conversations")
 def conversations():
-    ok, data = get_merged_messages()
-    if not ok:
-        return jsonify({"error": data}), 500
     names = contact_names()
     convs = {}
-    for m in data:
+    for m in get_merged_messages():
         key = m["key"]
         c = convs.setdefault(key, {
-            "number": m["number"],
-            "key": key,
-            "name": names.get(key),
-            "last_message": "",
-            "last_date": "",
-            "unread": 0,
-            "count": 0,
+            "number": m["number"], "key": key, "name": names.get(key),
+            "last_message": "", "last_date": "", "unread": 0, "count": 0,
         })
         c["count"] += 1
         # prefer showing the number in international format when available
@@ -282,12 +360,9 @@ def messages():
     key = normalize_number(number)
     if not key:
         return jsonify({"error": "Falta el parámetro number"}), 400
-    ok, data = get_merged_messages()
-    if not ok:
-        return jsonify({"error": data}), 500
     msgs = [
         {"body": m["body"], "type": m["type"], "date": m["date"], "read": m["read"]}
-        for m in data if m["key"] == key
+        for m in get_merged_messages() if m["key"] == key
     ]
     msgs.sort(key=lambda m: m["date"])
     return jsonify(msgs)
@@ -315,7 +390,6 @@ def send_sms():
         (number, normalize_number(number), message),
     )
     db.commit()
-    invalidate_sms_cache()
     return jsonify({"ok": True})
 
 
@@ -331,23 +405,16 @@ def search():
         return all(t in h for t in terms)
 
     names = contact_names()
-    # search in messages (accent-insensitive, all terms must match)
     found_msgs = []
-    ok, data = get_merged_messages()
-    if ok:
-        for m in data:
-            cname = names.get(m["key"]) or ""
-            if matches(f'{m["body"]} {m["number"]} {cname}'):
-                found_msgs.append({
-                    "number": m["number"],
-                    "name": names.get(m["key"]),
-                    "body": m["body"],
-                    "type": m["type"],
-                    "date": m["date"],
-                })
-        found_msgs.sort(key=lambda m: m["date"], reverse=True)
-        found_msgs = found_msgs[:50]
-    # search in contacts (name, number, notes)
+    for m in get_merged_messages():
+        cname = names.get(m["key"]) or ""
+        if matches(f'{m["body"]} {m["number"]} {cname}'):
+            found_msgs.append({
+                "number": m["number"], "name": names.get(m["key"]),
+                "body": m["body"], "type": m["type"], "date": m["date"],
+            })
+    found_msgs.sort(key=lambda m: m["date"], reverse=True)
+    found_msgs = found_msgs[:50]
     db = get_db()
     found_contacts = [
         dict(r) for r in db.execute("SELECT * FROM contacts ORDER BY name")
@@ -466,18 +533,20 @@ def import_contacts():
 
 @app.route("/api/status")
 def status():
-    """Quick diagnostics: checks that termux-api responds."""
-    ok, out = get_all_sms()
-    variant = _variant_state["idx"]
+    """Diagnostics: sync health, cache size, backfill progress."""
     db = get_db()
     sent_count = db.execute("SELECT COUNT(*) FROM sent_messages").fetchone()[0]
+    healthy = _sync_status["last_error"] is None
     return jsonify({
         "server": "ok",
-        "termux_api": "ok" if ok else "error",
-        "detail": None if ok else out,
-        "sms_count": len(out) if ok else 0,
+        "termux_api": "ok" if healthy else "error",
+        "detail": _sync_status["last_error"],
+        "sms_count": _sync_status["cached"],
         "local_sent_count": sent_count,
-        "sms_list_flags": " ".join(_LIST_VARIANTS[variant]) if variant is not None else None,
+        "last_sync": _sync_status["last_sync"],
+        "backfill_done": _sync_status["backfill_done"],
+        "backfill_offset": _sync_status["backfill_offset"],
+        "sync_interval": SYNC_INTERVAL,
         "sim_slot": SIM_SLOT or None,
         "time": datetime.now().isoformat(timespec="seconds"),
     })
@@ -485,6 +554,9 @@ def status():
 
 if __name__ == "__main__":
     init_db()
+    threading.Thread(target=sync_worker, daemon=True).start()
     print(f"\n  SMS Dashboard running on port {PORT}")
-    print(f"  From your PC open:  http://<phone-tailscale-ip>:{PORT}\n")
+    print(f"  From your PC open:  http://<phone-tailscale-ip>:{PORT}")
+    print("  First run: full SMS history sync happens in the background;")
+    print("  old conversations fill in progressively.\n")
     app.run(host="0.0.0.0", port=PORT, threaded=True)

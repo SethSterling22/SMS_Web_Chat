@@ -15,7 +15,7 @@ PC (browser) ──Tailscale/LAN──▶ Phone (Termux)
 
 1. **Termux** installed from F-Droid (the Play Store build is outdated and incompatible).
 2. **Termux:API** (the app, not just the package): install from F-Droid → https://f-droid.org/packages/com.termux.api/
-3. After installing it, go to **Android Settings → Apps → Termux:API → Permissions** and enable **SMS** and **Contacts**.
+3. **IMPORTANT — before using the app:** go to **Android Settings → Apps → Termux:API → Permissions** and grant FULL permissions for **SMS**, **Contacts** and **Phone (calls)**. Sending will silently fail without all three; the Phone permission is required on many devices even though the app only sends SMS.
 
 ## Installation
 
@@ -86,6 +86,15 @@ The phone's Tailscale IP (starts with `100.`) is shown by `tailscale ip` or in t
 
 The server listens on all of the phone's interfaces. With Tailscale this is safe (only devices in your tailnet can reach it), but avoid using it on public WiFi without Tailscale. Nothing leaves the phone: SMS, contacts and notes stay local.
 
+## How syncing works
+
+A background worker copies the phone's SMS into a local SQLite cache (`dashboard.db`):
+
+- **Backfill**: on first run it pages through the entire SMS history in chunks, so old conversations are complete. Progress is saved — if you restart the server, it resumes where it left off.
+- **Incremental**: every 10 seconds it fetches only the most recent messages, which is cheap for the phone.
+
+All dashboard requests read from the cache only — they never hit termux-api directly — so the UI stays fast regardless of how large your history is.
+
 ## How sent messages are stored
 
 Android only allows the *default* SMS app to write to the system SMS store, so messages sent with `termux-sms-send` usually never appear in `termux-sms-list`. The server records every message you send in its own SQLite database (`dashboard.db`) and merges both sources when showing a chat, deduplicating when the phone did record the message.
@@ -100,12 +109,13 @@ Conversations are grouped by the **last 10 digits** of the number, so `+1 787 55
 | `termux-sms-list` hangs | Termux and Termux:API installed from different sources (Play vs F-Droid) — both must be from F-Droid |
 | Page won't load from the PC | Check Tailscale is up on both devices and `start.sh` is running |
 | Sending fails or nothing arrives (dual-SIM phones) | Set the SIM slot: `SIM_SLOT=0 bash start.sh` (or `SIM_SLOT=1`) |
-| Sending silently does nothing | Check the Termux:API app has the SMS permission in Android settings |
+| Sending silently does nothing | Grant Termux:API full SMS, Contacts AND Phone permissions in Android settings |
+| Old chats incomplete right after starting | The initial backfill is still running; check `backfill_done` in `/api/status` |
 
-Visit `/api/status` for diagnostics (SMS count, flags in use, locally recorded sent messages).
+Visit `/api/status` for diagnostics (cache size, backfill progress, last sync, errors).
 
 ## Configuration
 
-Environment variables (optional): `PORT` (default 8080), `SMS_LIMIT` (how many SMS to read, default 2000), `DB_PATH` (SQLite location), `SIM_SLOT` (SIM slot for dual-SIM phones, e.g. `0` or `1`).
+Environment variables (optional): `PORT` (default 8080), `DB_PATH` (SQLite location), `SIM_SLOT` (SIM slot for dual-SIM phones, e.g. `0` or `1`), `SYNC_INTERVAL` (seconds between syncs, default 10), `RECENT_LIMIT` (messages per incremental sync, default 100), `BACKFILL_CHUNK` (messages per backfill page, default 400).
 
 Note: the dashboard UI is in Spanish.

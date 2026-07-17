@@ -18,7 +18,9 @@ if termux-sms-list -l 1 > /dev/null 2>&1; then
 else
   echo "    ✖ Could not read SMS."
   echo "      1. Make sure the Termux:API APP is installed (from F-Droid)."
-  echo "      2. Go to Android Settings > Apps > Termux:API > Permissions and enable SMS and Contacts."
+  echo "      2. Go to Android Settings > Apps > Termux:API > Permissions and grant"
+  echo "         FULL permissions: SMS, Contacts AND Phone (calls). All three are"
+  echo "         required before using the app — sending fails silently otherwise."
   echo "      3. Run again: bash install.sh"
 fi
 
