@@ -64,7 +64,7 @@ The phone's Tailscale IP (starts with `100.`) is shown by `tailscale ip` or in t
 
 ## Features
 
-- **Chats**: conversation list sorted by date, with unread counts. Auto-refreshes every 8 seconds.
+- **Chats**: conversation list sorted by date, with unread counts. Auto-refreshes every 8 seconds. Each chat opens with the latest 20 messages (sent + received); scrolling to the top loads 20 more at a time, back to the beginning of the history.
 - **Send**: Enter sends, Shift+Enter inserts a newline. A ⧉ button on each message copies it to the clipboard.
 - **Templates**: "Templates" button to create/edit them. In a chat, the 📋 button inserts one. The `{nombre}` variable is automatically replaced with the contact's name; other variables (`{fecha}`, etc.) are edited before sending (you get a warning if any is left unreplaced).
 - **New chat**: "✚ Nuevo chat" button — type a number and optionally save it as a contact.
@@ -111,6 +111,7 @@ Conversations are grouped by the **last 10 digits** of the number, so `+1 787 55
 | Sending fails or nothing arrives (dual-SIM phones) | Set the SIM slot: `SIM_SLOT=0 bash start.sh` (or `SIM_SLOT=1`) |
 | Sending silently does nothing | Grant Termux:API full SMS, Contacts AND Phone permissions in Android settings |
 | Old chats incomplete right after starting | The initial backfill is still running; check `backfill_done` in `/api/status` |
+| Replies you sent from the phone's Messages app are missing | If the chat uses **RCS** ("chat features" in Google Messages), those messages are NOT in Android's SMS store and no third-party app can read them. Turn off RCS/chat features in the Messages app settings to make new conversations go over SMS. Messages sent from this dashboard are always recorded. |
 
 Visit `/api/status` for diagnostics (cache size, backfill progress, last sync, errors).
 

@@ -86,6 +86,8 @@
   .tpl-menu .item .name { font-weight: 600; font-size: 13px; }
   .tpl-menu .item .preview { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+  .load-older { text-align: center; color: var(--muted); font-size: 12px; padding: 6px 0 10px; }
+
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--border); padding: 10px 18px; border-radius: 10px; font-size: 13.5px; display: none; z-index: 100; }
   .toast.show { display: block; }
   .toast.error { border-color: var(--red); color: #fca5a5; }
@@ -203,6 +205,11 @@ let templatesCache = [];
 let editingTplId = null;
 let pollTimer = null;
 let lastMsgSignature = '';
+// chat pagination: PAGE newest messages first, +PAGE more per scroll-up
+const PAGE = 20;
+let chatLoaded = 0;      // messages currently loaded in the open chat
+let chatHasMore = false; // older messages available on the server
+let loadingOlder = false;
 
 const $ = id => document.getElementById(id);
 
@@ -346,27 +353,63 @@ async function openChat(number, name) {
   $('chatActions').style.display = 'flex';
   $('messages').innerHTML = '<div class="empty-state">Cargando…</div>';
   lastMsgSignature = '';
+  chatLoaded = 0; chatHasMore = false; loadingOlder = false;
   await refreshMessages(true);
   renderSidebar();
   $('msgInput').focus();
 }
 
-async function refreshMessages(scroll) {
+function bubbleHTML(m) {
+  return `<div class="bubble ${m.type === 'inbox' ? 'in' : 'out'}">
+    <span class="copy" title="Copiar" onclick="copyText(this)">⧉</span>${esc(m.body)}
+    <span class="meta">${fmtDate(m.date)}</span></div>`;
+}
+
+// fetches the newest window (everything already loaded + any new messages)
+async function refreshMessages(initial) {
   if (!currentNumber) return;
   try {
-    const msgs = await api('/api/messages?number=' + encodeURIComponent(currentNumber));
-    const sig = msgs.length + '|' + (msgs.length ? msgs[msgs.length-1].date + msgs[msgs.length-1].body : '');
-    if (sig === lastMsgSignature) return;
+    const limit = Math.max(chatLoaded, PAGE);
+    const r = await api(`/api/messages?number=${encodeURIComponent(currentNumber)}&limit=${limit}`);
+    const msgs = r.messages;
+    const sig = r.total + '|' + msgs.length + '|' + (msgs.length ? msgs[msgs.length-1].date + msgs[msgs.length-1].body : '');
+    if (!initial && sig === lastMsgSignature) return;
     lastMsgSignature = sig;
+    chatLoaded = msgs.length; chatHasMore = r.has_more;
     const box = $('messages');
-    box.innerHTML = msgs.length ? msgs.map(m =>
-      `<div class="bubble ${m.type === 'inbox' ? 'in' : 'out'}">
-        <span class="copy" title="Copiar" onclick="copyText(this)">⧉</span>${esc(m.body)}
-        <span class="meta">${fmtDate(m.date)}</span></div>`).join('')
-      : '<div class="empty-state">Sin mensajes aún — escribe el primero 👇</div>';
-    if (scroll !== false) box.scrollTop = box.scrollHeight;
+    // keep the user's position unless they're already at the bottom
+    const nearBottom = initial || (box.scrollHeight - box.scrollTop - box.clientHeight < 150);
+    const prevTop = box.scrollTop;
+    box.innerHTML =
+      (chatHasMore ? '<div class="load-older">Desplázate arriba para cargar mensajes anteriores…</div>' : '') +
+      (msgs.length ? msgs.map(bubbleHTML).join('') : '<div class="empty-state">Sin mensajes aún — escribe el primero 👇</div>');
+    box.scrollTop = nearBottom ? box.scrollHeight : prevTop;
   } catch(e) { /* silent during polling */ }
 }
+
+// loads PAGE older messages, prepending them without losing scroll position
+async function loadOlder() {
+  if (!currentNumber || !chatHasMore || loadingOlder) return;
+  loadingOlder = true;
+  try {
+    const r = await api(`/api/messages?number=${encodeURIComponent(currentNumber)}&limit=${PAGE}&offset=${chatLoaded}`);
+    const box = $('messages');
+    const prevH = box.scrollHeight, prevTop = box.scrollTop;
+    const older = box.querySelector('.load-older');
+    if (older && !r.has_more) older.remove();
+    const anchor = box.querySelector('.load-older');
+    const html = r.messages.map(bubbleHTML).join('');
+    if (anchor) anchor.insertAdjacentHTML('afterend', html);
+    else box.insertAdjacentHTML('afterbegin', html);
+    chatLoaded += r.messages.length; chatHasMore = r.has_more;
+    box.scrollTop = box.scrollHeight - prevH + prevTop;  // stay on the same message
+  } catch(e) { /* ignore */ }
+  loadingOlder = false;
+}
+
+$('messages').addEventListener('scroll', () => {
+  if ($('messages').scrollTop < 60) loadOlder();
+});
 
 function copyText(el) {
   const bubble = el.parentElement.cloneNode(true);

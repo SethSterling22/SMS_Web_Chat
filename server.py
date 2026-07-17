@@ -356,16 +356,32 @@ def conversations():
 
 @app.route("/api/messages")
 def messages():
+    """Paginated chat history. Returns the newest `limit` messages by
+    default; `offset` counts backwards from the newest (offset=20 skips
+    the 20 most recent), so the UI can load older pages while scrolling up.
+    """
     number = request.args.get("number", "")
     key = normalize_number(number)
     if not key:
         return jsonify({"error": "Falta el parámetro number"}), 400
+    try:
+        limit = min(max(int(request.args.get("limit", 20)), 1), 500)
+        offset = max(int(request.args.get("offset", 0)), 0)
+    except ValueError:
+        limit, offset = 20, 0
     msgs = [
         {"body": m["body"], "type": m["type"], "date": m["date"], "read": m["read"]}
         for m in get_merged_messages() if m["key"] == key
     ]
     msgs.sort(key=lambda m: m["date"])
-    return jsonify(msgs)
+    total = len(msgs)
+    end = max(total - offset, 0)
+    start = max(end - limit, 0)
+    return jsonify({
+        "messages": msgs[start:end],
+        "total": total,
+        "has_more": start > 0,
+    })
 
 
 @app.route("/api/send", methods=["POST"])
